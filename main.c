@@ -7,14 +7,51 @@
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <stdarg.h>
 
 #define HTTP_PORT 80
 #define HTTPS_PORT 443
 #define BUFFER_SIZE 1024
 
+// 日志颜色
+#define LOG_COLOR_RED     "\x1b[31m"
+#define LOG_COLOR_GREEN   "\x1b[32m"
+#define LOG_COLOR_YELLOW  "\x1b[33m"
+#define LOG_COLOR_BLUE    "\x1b[34m"
+#define LOG_COLOR_RESET   "\x1b[0m"
+
+// 日志级别
+typedef enum { DEBUG, INFO, WARN, ERROR } LogLevel;
+
+#define LOG_DEBUG 1
+
+void log_message(LogLevel level, const char *format, ...) {
+    #ifdef LOG_DEBUG
+    const char *color;
+    const char *level_strings[4] = {"DEBUG", "INFO", "WARN", "ERROR"};
+    switch(level) {
+        case DEBUG: color = LOG_COLOR_BLUE; break;
+        case INFO:  color = LOG_COLOR_GREEN; break;
+        case WARN:  color = LOG_COLOR_YELLOW; break;
+        case ERROR: color = LOG_COLOR_RED; break;
+        default: color = LOG_COLOR_RESET;
+    }
+
+    printf("%s[%s] ", color, level_strings[level]);
+
+    va_list args;
+    va_start(args, format);
+    vprintf(format, args);
+    va_end(args);
+
+    printf("%s\n", LOG_COLOR_RESET);
+    #endif
+}
+
 void init_openssl() {
-    SSL_load_error_strings();	
+    SSL_load_error_strings();
     OpenSSL_add_ssl_algorithms();
+    log_message(DEBUG, "OpenSSL initialized");
 }
 
 SSL_CTX *create_context() {
@@ -26,9 +63,11 @@ SSL_CTX *create_context() {
     if (!ctx) {
         perror("Unable to create SSL context");
         ERR_print_errors_fp(stderr);
+        log_message(ERROR, "Failed to create SSL context");
         exit(EXIT_FAILURE);
     }
 
+    log_message(DEBUG, "SSL context created");
     return ctx;
 }
 
@@ -38,13 +77,17 @@ void configure_context(SSL_CTX *ctx) {
     // Set the key and cert
     if (SSL_CTX_use_certificate_file(ctx, "server.crt", SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
+        log_message(ERROR, "Failed to load SSL certificate");
         exit(EXIT_FAILURE);
     }
 
     if (SSL_CTX_use_PrivateKey_file(ctx, "server.key", SSL_FILETYPE_PEM) <= 0 ) {
         ERR_print_errors_fp(stderr);
+        log_message(ERROR, "Failed to load SSL private key");
         exit(EXIT_FAILURE);
     }
+
+    log_message(DEBUG, "SSL context configured");
 }
 
 void handle_request(int client_socket, SSL *ssl) {
@@ -115,7 +158,14 @@ void start_server(int port, SSL_CTX *ctx) {
 
         if (port == HTTPS_PORT) {
             SSL *ssl = SSL_new(ctx);
-            SSL_set_fd(ssl, *client_socket);
+	    if (!ssl) {
+	        log_message(ERROR, "Failed to create SSL structure");
+	        // 处理错误，例如关闭socket，清理资源等
+	    }
+	    if (SSL_set_fd(ssl, client_socket) == 0) {
+	        log_message(ERROR, "Failed to set the file descriptor for SSL");
+	        // 处理错误
+	    }
             if (SSL_accept(ssl) <= 0) {
                 ERR_print_errors_fp(stderr);
             } else {
@@ -133,6 +183,7 @@ void start_server(int port, SSL_CTX *ctx) {
 int main() {
     SSL_CTX *ctx;
 
+    log_message(INFO, "Server starting...");
     init_openssl();
     ctx = create_context();
     configure_context(ctx);
@@ -151,6 +202,7 @@ int main() {
     SSL_CTX_free(ctx);
     //cleanup_openssl();
 
+    log_message(INFO, "Server stopping...");
     return 0;
 }
 

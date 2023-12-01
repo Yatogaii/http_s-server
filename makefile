@@ -12,7 +12,7 @@ server: $(OBJ)
 .PHONY: clean install_dependencies generate_cert
 
 debug:  $(OBJ)
-	$(CC) -o $@ $^ $(CFLAGS) $(LIBS) -g
+	$(CC) -DLOG_DEBUG -o $@ $^ $(CFLAGS) $(LIBS) -g
 
 clean:
 	rm -f *.o *~ core server
