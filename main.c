@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -129,22 +130,6 @@ void get_file_content(char *file_path, char *response_body) {
   }
 }
 
-void get_partial_content(char *file_path, char *response_body, char *request) {
-  char *range_header = strstr(request, "Range: bytes=");
-  if (range_header) {
-    range_header += strlen("Range: bytes=");
-    int start_range, end_range;
-    sscanf(range_header, "%d-%d", &start_range, &end_range);
-
-    FILE *file = fopen(file_path, "rb");
-    if (file) {
-      fseek(file, start_range, SEEK_SET);
-      fread(response_body, sizeof(char), end_range - start_range + 1, file);
-      fclose(file);
-    }
-  }
-}
-
 int has_range_field(char *request) {
   // This is a simple implementation and might not cover all cases.
   return strstr(request, "Range:") != NULL;
@@ -207,10 +192,23 @@ void send_http_partial_response(int client_socket, SSL *ssl,
                                 const char *file_path, const char *range_header,
                                 struct stat *file_stat) {
   // 解析Range头以确定所请求的范围
-  int start, end;
+  int start, end = -1;
+  int result = sscanf(range_header, "Range: bytes=%d-%d", &start, &end);
+  if (result == 1) {
+    // 只成功读取了 start 数字
+    log_message(DEBUG, "Start: %d\n", start);
+  } else if (result == 2) {
+    // 成功读取了 start 和 end 两个数字
+    log_message(DEBUG, "Start: %d, End: %d\n", start, end);
+  } else {
+    // 解析失败
+    log_message(ERROR, "Can't extact start and end");
+    send_http_response(client_socket, ssl, 404, NULL);
+    return;
+  }
   sscanf(range_header, "bytes=%d-%d", &start, &end);
 
-  if (end == 0 || end > file_stat->st_size) {
+  if (end == -1 || end > file_stat->st_size) {
     end = file_stat->st_size - 1;
   }
 
@@ -274,9 +272,11 @@ void handle_request(int client_socket, SSL *ssl) {
     return;
   buffer[bytes_read] = '\0';
 
-  char method[10], url[255], protocol[10], file_path[512];
+  log_message(INFO, "Raw Req");
+  printf("%s", buffer);
+
+  char method[10], url[64], protocol[10], file_path[512];
   sscanf(buffer, "%s %s %s", method, url, protocol);
-  log_message(INFO, url);
 
   sprintf(file_path, "%s%s", ROOT_DIR, url);
 
@@ -285,7 +285,7 @@ void handle_request(int client_socket, SSL *ssl) {
 
   // 重定向HTTP到HTTPS
   if (!ssl && strncmp(url, "/http", 5) != 0) {
-        char host[256]; // 创建一个变量来存储 host 信息
+    char host[256]; // 创建一个变量来存储 host 信息
     char *host_start = strstr(buffer, "Host: ");
     if (host_start) {
       host_start += 6; // 移过 "Host: "
@@ -295,11 +295,7 @@ void handle_request(int client_socket, SSL *ssl) {
 
         strncpy(host, host_start, sizeof(host));
         host[sizeof(host) - 1] = '\0'; // 确保字符串以 null 结尾
-
-        // 在此处使用 host 变量，例如发送重定向响应
-        // ...
-
-        *host_end = '\r'; // 恢复原始 buffer
+        *host_end = '\r';              // 恢复原始 buffer
       }
     } else {
       log_message(ERROR, "Cant find Host in Http Header");
@@ -307,7 +303,7 @@ void handle_request(int client_socket, SSL *ssl) {
     }
     char location[512];
     sprintf(location, "https://%s%s", host, url);
-    log_message(INFO, location);
+    log_message(INFO, "Loc:", location);
     send_http_redirect(client_socket, ssl, location);
     return;
   }
@@ -315,6 +311,7 @@ void handle_request(int client_socket, SSL *ssl) {
   // 处理HTTPS请求
   if (file_exists) {
     char *range_header = strstr(buffer, "Range: bytes=");
+    log_message(INFO, "Range Header: %s", range_header);
     if (range_header) {
       send_http_partial_response(client_socket, ssl, file_path, range_header,
                                  &file_stat);
@@ -399,19 +396,10 @@ void handle_request(int client_socket, SSL *ssl) {
 //   }
 // }
 
-void *connection_handler(void *data) {
-  int client_socket = *((int *)data);
-  handle_request(client_socket, NULL);
-  close(client_socket);
-  free(data);
-  return NULL;
-}
-
 void start_server(int port, SSL_CTX *ctx) {
   int server_fd, *client_socket;
   struct sockaddr_in address;
   int addrlen = sizeof(address);
-  pthread_t thread_id;
 
   // Create socket
   if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -442,7 +430,7 @@ void start_server(int port, SSL_CTX *ctx) {
         accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
 
     if (port == HTTPS_PORT) {
-      SSL *ssl = get_new_ssl(ctx);
+      SSL *ssl = get_new_ssl();
       if (!ssl) {
         log_message(ERROR, "Failed to create SSL structure");
         ERR_print_errors_fp(stderr);
@@ -461,16 +449,16 @@ void start_server(int port, SSL_CTX *ctx) {
       }
       SSL_free(ssl);
     } else {
-      pthread_create(&thread_id, NULL, connection_handler, client_socket);
+      handle_request(*client_socket, NULL);
     }
+    close(*client_socket);
+    free(client_socket);
   }
 
   close(server_fd);
 }
 
 int main() {
-  SSL_CTX *ctx;
-
   log_message(INFO, "Server starting...");
   init_openssl();
 
@@ -486,9 +474,6 @@ int main() {
 
   pthread_join(thread_id_http, NULL);
   pthread_join(thread_id_https, NULL);
-
-  // SSL_CTX_free(ctx);
-  // cleanup_openssl();
 
   log_message(INFO, "Server stopping...");
   return 0;
